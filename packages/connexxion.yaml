@@ -1,0 +1,105 @@
+# Connexxion Groepsvervoer -> Home Assistant
+# Zet dit bestand in je packages-map en het script op /config/connexxion/connexxion.py
+# secrets.yaml (links uitgelijnd, zonder spaties ervoor):
+#   connexxion_username: 'jouw@email.nl'
+#   connexxion_password: 'wachtwoord'
+
+command_line:
+  - sensor:
+      name: Connexxion taxi
+      unique_id: connexxion_taxi
+      icon: mdi:bus-school
+      command: "python3 /config/connexxion/connexxion.py"
+      command_timeout: 60
+      # Verversen gebeurt via de automatisering hieronder
+      scan_interval: 86400
+      value_template: "{{ value_json.status }}"
+      json_attributes:
+        - bijgewerkt
+        - fout
+        - reiziger
+        - vandaag
+        - volgende
+        - ritten
+
+template:
+  - sensor:
+      # Instaptijd (ophalen bij BSO/school) van de rit van vandaag
+      - name: Connexxion taxi ophalen
+        unique_id: connexxion_taxi_ophalen
+        icon: mdi:car-clock
+        state: >
+          {% set r = state_attr('sensor.connexxion_taxi', 'vandaag') %}
+          {{ (r.live_ophalen or r.ophalen) if r else 'Geen rit' }}
+        availability: "{{ is_state('sensor.connexxion_taxi', 'ok') }}"
+        attributes:
+          gepland: "{{ (state_attr('sensor.connexxion_taxi', 'vandaag') or {}).get('ophalen') }}"
+          van: "{{ (state_attr('sensor.connexxion_taxi', 'vandaag') or {}).get('van') }}"
+          status: "{{ (state_attr('sensor.connexxion_taxi', 'vandaag') or {}).get('status_tekst') }}"
+          chauffeur: "{{ (state_attr('sensor.connexxion_taxi', 'vandaag') or {}).get('chauffeur') }}"
+          kenteken: "{{ (state_attr('sensor.connexxion_taxi', 'vandaag') or {}).get('kenteken') }}"
+
+      # Aankomsttijd thuis van de rit van vandaag
+      - name: Connexxion taxi thuisbrengen
+        unique_id: connexxion_taxi_thuisbrengen
+        icon: mdi:home-clock
+        state: >
+          {% set r = state_attr('sensor.connexxion_taxi', 'vandaag') %}
+          {{ (r.live_aankomst or r.aankomst) if r else 'Geen rit' }}
+        availability: "{{ is_state('sensor.connexxion_taxi', 'ok') }}"
+        attributes:
+          gepland: "{{ (state_attr('sensor.connexxion_taxi', 'vandaag') or {}).get('aankomst') }}"
+          naar: "{{ (state_attr('sensor.connexxion_taxi', 'vandaag') or {}).get('naar') }}"
+          chauffeur: "{{ (state_attr('sensor.connexxion_taxi', 'vandaag') or {}).get('chauffeur') }}"
+          kenteken: "{{ (state_attr('sensor.connexxion_taxi', 'vandaag') or {}).get('kenteken') }}"
+
+      # Eerstvolgende rit als tijdstip (handig voor automatiseringen en de dashboard)
+      - name: Connexxion taxi volgende rit
+        unique_id: connexxion_taxi_volgende_rit
+        device_class: timestamp
+        icon: mdi:calendar-clock
+        state: >
+          {% set r = state_attr('sensor.connexxion_taxi', 'volgende') %}
+          {{ (r.ophalen_iso | as_datetime).isoformat() if r and r.ophalen_iso else none }}
+        availability: "{{ is_state('sensor.connexxion_taxi', 'ok') }}"
+        attributes:
+          dag: "{{ (state_attr('sensor.connexxion_taxi', 'volgende') or {}).get('dag') }}"
+          datum: "{{ (state_attr('sensor.connexxion_taxi', 'volgende') or {}).get('datum') }}"
+          ophalen: "{{ (state_attr('sensor.connexxion_taxi', 'volgende') or {}).get('ophalen') }}"
+          aankomst: "{{ (state_attr('sensor.connexxion_taxi', 'volgende') or {}).get('aankomst') }}"
+          van: "{{ (state_attr('sensor.connexxion_taxi', 'volgende') or {}).get('van') }}"
+          naar: "{{ (state_attr('sensor.connexxion_taxi', 'volgende') or {}).get('naar') }}"
+          status: "{{ (state_attr('sensor.connexxion_taxi', 'volgende') or {}).get('status_tekst') }}"
+
+automation:
+  - id: connexxion_taxi_verversen
+    alias: Connexxion taxi verversen
+    description: >
+      Haalt de planning 's ochtends één keer op. Op een dag met een rit wordt
+      vanaf 45 min vóór het ophalen tot de aankomst elke 5 minuten ververst,
+      voor live tijden en de chauffeur.
+    mode: single
+    triggers:
+      - trigger: time
+        at: "06:30:00"
+        id: ochtend
+      - trigger: time_pattern
+        minutes: "/5"
+        id: live
+    conditions:
+      - condition: or
+        conditions:
+          - condition: trigger
+            id: ochtend
+          - condition: template
+            value_template: >
+              {% set r = state_attr('sensor.connexxion_taxi', 'vandaag') %}
+              {% if r and r.ophalen_iso and r.aankomst_iso %}
+                {% set start = (r.ophalen_iso | as_datetime) - timedelta(minutes=45) %}
+                {% set eind = (r.aankomst_iso | as_datetime) + timedelta(minutes=15) %}
+                {{ start <= now() <= eind }}
+              {% else %}false{% endif %}
+    actions:
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.connexxion_taxi
